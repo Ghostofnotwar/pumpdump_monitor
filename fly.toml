@@ -1,55 +1,56 @@
-# Replace with your globally unique Fly app name before the first deploy.
-# In GitHub Actions, FLY_APP_NAME overrides this value.
-app = "pumpdump-monitor-replace-me"
-primary_region = "ams"
-kill_signal = "SIGTERM"
-kill_timeout = "30s"
+# fly.toml app configuration file generated for pumpdump-monitor on 2026-10-29T09:04:31Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'pumpdump-monitor'
+primary_region = 'ams'
+kill_signal = 'SIGTERM'
+kill_timeout = '30s'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
+
+[deploy]
+  strategy = 'immediate'
 
 [env]
-  PORT = "8000"
-  DATABASE_URL = "sqlite:////data/bot.db"
-  SNAPSHOT_DIR = "/data/snapshots"
-  LOG_LEVEL = "INFO"
-  POLL_INTERVAL_SEC = "2"
-  ALERT_WINDOW_SEC = "300"
-  ALERT_COOLDOWN_SEC = "600"
-  MAX_SYMBOLS = "500"
-  DROP_PENDING_UPDATES = "false"
-
-[http_service]
-  internal_port = 8000
-  force_https = true
-  auto_stop_machines = "off"
-  auto_start_machines = false
-  min_machines_running = 1
-  processes = ["app"]
-
-  [http_service.concurrency]
-    type = "requests"
-    soft_limit = 20
-    hard_limit = 40
-
-  # Liveness: do not restart just because Bybit/Telegram has a transient outage.
-  [[http_service.checks]]
-    grace_period = "30s"
-    interval = "15s"
-    timeout = "5s"
-    method = "GET"
-    path = "/healthz"
+  ALERT_COOLDOWN_SEC = '600'
+  ALERT_WINDOW_SEC = '300'
+  DATABASE_URL = 'sqlite:////data/bot.db'
+  DROP_PENDING_UPDATES = 'false'
+  LOG_LEVEL = 'INFO'
+  MAX_SYMBOLS = '500'
+  POLL_INTERVAL_SEC = '2'
+  PORT = '8000'
+  SNAPSHOT_DIR = '/data/snapshots'
 
 [[mounts]]
-  source = "pumpdump_data"
-  destination = "/data"
+  source = 'pumpdump_data'
+  destination = '/data'
 
-# Stop the old polling process before starting its replacement.
-# This app intentionally runs ONE machine; SQLite and polling are not multi-node.
-[deploy]
-  strategy = "immediate"
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 40
+    soft_limit = 20
+
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  cpu_kind = "shared"
+  memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "1gb"
+  memory_mb = 256
