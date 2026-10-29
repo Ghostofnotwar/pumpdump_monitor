@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10161f">
+  <title>Pump & Dump — Монитор</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">↗↘</span><div><p class="eyebrow">BYBIT · USDT PERPETUALS</p><h1>Рынок под наблюдением</h1></div></div>
+      <span id="connection" class="pill neutral">Подключение…</span>
+    </header>
+    <div id="banner" class="banner" role="alert" hidden></div>
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab active" data-view="overview" aria-current="page">Обзор</button>
+      <button class="tab" data-view="settings">Настройки</button>
+      <button class="tab" data-view="history">История</button>
+    </nav>
+    <section id="overview" class="view">
+      <div class="section-heading"><div><p class="eyebrow">LIVE MONITOR</p><h2>Состояние системы</h2></div><button id="refresh-status" class="secondary small">Обновить</button></div>
+      <div class="metrics">
+        <article class="metric"><span>Отслеживается пар</span><strong id="pairs">—</strong><small id="pair-limit">Ликвидные перпетуалы</small></article>
+        <article class="metric"><span>Окно движения</span><strong id="window">—</strong><small>Не таймфрейм свечей</small></article>
+        <article class="metric"><span>Отправлено алертов</span><strong id="sent">—</strong><small>С момента запуска</small></article>
+        <article class="metric"><span>Последний тик</span><strong id="last-poll" class="time-value">—</strong><small id="poll-interval">Ожидание данных</small></article>
+      </div>
+      <div class="panel system-panel"><div><h3>Telegram + сбор рынка</h3><p id="system-detail">Проверяем готовность сервисов…</p></div><span id="system-dot" class="status-dot" aria-hidden="true"></span></div>
+      <div class="panel"><h3>Как работает сигнал</h3><p>Сравниваем последнюю цену с ценой около начала пятиминутного окна. Пропуски данных подавляют сигнал, повторные уведомления ограничены антиспамом. Фильтры применяются отдельно к вашему чату.</p><p class="muted">Данные могут запаздывать. Сигнал не гарантирует продолжение движения и не является инвестиционной рекомендацией.</p></div>
+    </section>
+    <section id="settings" class="view" hidden>
+      <div class="section-heading"><div><p class="eyebrow">YOUR SIGNALS</p><h2>Ваши фильтры</h2></div><span class="pill neutral">Личный чат</span></div>
+      <form id="settings-form" class="panel form-panel">
+        <fieldset id="settings-fields" disabled>
+          <label class="switch-row"><span><b>Уведомления включены</b><small>Пауза не останавливает сбор рынка</small></span><input id="paused" name="paused" type="checkbox" role="switch"></label>
+          <div class="form-grid">
+            <label>Направление<select id="direction" name="direction"><option value="both">PUMP + DUMP</option><option value="pump">Только PUMP</option><option value="dump">Только DUMP</option></select></label>
+            <label>Порог движения, %<input id="pump_threshold" name="pump_threshold" type="number" min="1" max="50" step="0.1" required><small>От 1 до 50%, в обе стороны</small></label>
+            <label>Оборот за 24 ч, USDT<input id="volume_min_usd" name="volume_min_usd" type="number" min="100000" max="10000000" step="100000" required><small>Не объём отдельной сделки</small></label>
+            <label>Таймфрейм свечей<select id="timeframe" name="timeframe"><option value="1">1 минута</option><option value="3">3 минуты</option><option value="5">5 минут</option><option value="15">15 минут</option><option value="30">30 минут</option><option value="60">1 час</option><option value="240">4 часа</option><option value="D">1 день</option></select></label>
+            <label>Тема графика<select id="theme" name="theme"><option value="dark">Тёмная</option><option value="light">Светлая</option></select></label>
+          </div>
+          <h3>Панели графика</h3>
+          <label class="check-row"><input name="show_sma" id="show_sma" type="checkbox"><span>Volume SMA 9 <small>Средний объём свечей</small></span></label>
+          <label class="check-row"><input name="show_delta" id="show_delta" type="checkbox"><span>CVD proxy <small>Приближение по OHLCV, не реальные сделки</small></span></label>
+          <label class="check-row"><input name="show_heatmap" id="show_heatmap" type="checkbox"><span>Профиль объёма <small>Оценка распределения внутри свечей</small></span></label>
+          <p class="notice">Источник — публичные свечи Bybit. Панели OI и ликвидаций отключены: достоверного источника этих данных нет.</p>
+          <button id="save-settings" class="primary" type="submit">Сохранить настройки</button>
+          <p id="save-result" class="save-result" role="status"></p>
+        </fieldset>
+      </form>
+    </section>
+    <section id="history" class="view" hidden>
+      <div class="section-heading"><div><p class="eyebrow">DELIVERED ALERTS</p><h2>История сигналов</h2></div><button id="refresh-history" class="secondary small">Обновить</button></div>
+      <p class="muted">Последние 10 доставленных уведомлений. Изображения хранятся ограниченное время.</p>
+      <div id="alerts" class="alerts" aria-live="polite"><div class="panel empty">Откройте монитор через Telegram, чтобы загрузить историю.</div></div>
+    </section>
+    <footer>PUMP & DUMP MONITOR <span>Только информация. Не торговая рекомендация.</span></footer>
+  </main>
+</body>
+</html>

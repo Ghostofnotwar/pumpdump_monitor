@@ -1,0 +1,32 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python -m pytest -q --timeout=30 --timeout-method=thread
+      - run: python -m compileall -q .
+      - run: docker build -t pumpdump-monitor:ci .
+      - name: Smoke-test non-root container and persistent directory
+        run: |
+          docker run --rm -v pumpdump-ci-data:/data pumpdump-monitor:ci python -c "import os, main; from pathlib import Path; assert os.getuid() == 10001; Path('/data/smoke-test').write_text('ok'); print('Non-root import and volume write: OK')"

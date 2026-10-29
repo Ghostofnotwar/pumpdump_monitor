@@ -1,171 +1,229 @@
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import matplotlib.ticker as mticker
-from datetime import datetime
+"""Candlestick snapshots from actual Bybit OHLCV; derived indicators are labeled.
 
-os.makedirs("/tmp/snapshots", exist_ok=True)
+Matplotlib is not thread-safe: callers use asyncio.to_thread and this module locks
+the entire render. No real OI, liquidation or order-flow feed is fabricated.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import threading
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import mplfinance as mpf
+import numpy as np
+import pandas as pd
+
+_RENDER_LOCK = threading.Lock()
+
 
 def human_format(num, pos=None):
-    """Форматирует числа в понятные K, M"""
-    abs_num = abs(num)
-    if abs_num < 1 and abs_num != 0: return f"{num:.4f}"
-    if abs_num < 1000: return f"{num:g}"
-    magnitude = 0
-    while abs(num) >= 1000:
-        magnitude += 1
-        num /= 1000.0
-    return '%.1f%s' % (num, ['', 'k', 'M', 'B', 'T'][magnitude])
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if abs(num) >= threshold:
+            return f"{num / threshold:.1f}{suffix}"
+    return f"{num:.4f}" if 0 < abs(num) < 1 else f"{num:g}"
 
-def klines_to_df(klines):
-    try:
-        if not klines or len(klines) < 10: return pd.DataFrame()
-        raw = np.array(klines, dtype=object)
-        
-        # Создаем DF максимально надежным способом
-        df = pd.DataFrame(index=pd.to_datetime(raw[:, 0].astype(float), unit='ms'))
-        df['Open'] = raw[:, 1].astype(float)
-        df['High'] = raw[:, 2].astype(float)
-        df['Low'] = raw[:, 3].astype(float)
-        df['Close'] = raw[:, 4].astype(float)
-        df['Volume'] = raw[:, 5].astype(float)
-        df['Turnover'] = raw[:, 6].astype(float) if raw.shape[1] > 6 else (df['Volume'] * df['Close'])
-        
-        df.index.name = 'Date'
-        df = df.sort_index()
-        
-        if df['Close'].max() <= 0: return pd.DataFrame()
 
-        # SMA9
-        df['SMA9'] = df['Volume'].rolling(window=9).mean().fillna(df['Volume'])
-        
-        # CVD (Дельта)
-        diff = (df['High'] - df['Low']).replace(0, 1)
-        df['RawDelta'] = (((df['Close'] - df['Low']) / diff) * df['Volume']) - (df['Volume'] / 2)
-        df['CVD_C'] = df['RawDelta'].cumsum()
-        df['CVD_O'] = df['CVD_C'].shift(1).fillna(df['CVD_C'])
-        
-        # Очистка свечей CVD от гигантских фитилей
-        df['CVD_H'] = df[['CVD_O', 'CVD_C']].max(axis=1)
-        df['CVD_L'] = df[['CVD_O', 'CVD_C']].min(axis=1)
-        
-        # OI
-        df['OI_C'] = df['Turnover']
-        df['OI_O'] = df['OI_C'].shift(1).fillna(df['OI_C'])
-        df['OI_H'] = df[['OI_O', 'OI_C']].max(axis=1)
-        df['OI_L'] = df[['OI_O', 'OI_C']].min(axis=1)
-        
-        # Liq
-        df['Liq_U'] = np.where(df['Close'] < df['Open'], df['Volume'] * 0.1, 0)
-        df['Liq_D'] = np.where(df['Close'] > df['Open'], -df['Volume'] * 0.08, 0)
-        
-        return df.fillna(0)
-    except Exception: return pd.DataFrame()
+def klines_to_df(klines: list) -> pd.DataFrame:
+    columns = ["Date", "Open", "High", "Low", "Close", "Volume", "Turnover"]
+    records = []
+    for row in klines[-1000:]:
+        try:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            stamp, *values = row[:7]
+            values = [float(value) for value in values]
+            if len(values) == 5:
+                values.append(values[3] * values[4])
+            ts, o, h, low, c, volume, turnover = [float(stamp), *values]
+            if not all(math.isfinite(v) for v in (ts, o, h, low, c, volume, turnover)):
+                continue
+            if ts <= 0 or min(o, h, low, c) <= 0 or volume < 0 or turnover < 0:
+                continue
+            if low > min(o, c) or h < max(o, c) or low > h:
+                continue
+            records.append((ts, o, h, low, c, volume, turnover))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    df = pd.DataFrame(records, columns=columns)
+    if df.empty:
+        return pd.DataFrame()
+    df["Date"] = pd.to_datetime(df["Date"], unit="ms", utc=True).dt.tz_localize(None)
+    df = df.drop_duplicates("Date", keep="last").set_index("Date").sort_index()
+    df["SMA9"] = df["Volume"].rolling(9, min_periods=1).mean()
+    spread = df["High"] - df["Low"]
+    clv = ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / spread
+    df["DeltaProxy"] = clv.replace([np.inf, -np.inf], 0).fillna(0) * df["Volume"]
+    df["CVD_C"] = df["DeltaProxy"].cumsum()
+    df["CVD_O"] = df["CVD_C"].shift(1).fillna(0)
+    df["CVD_H"] = df[["CVD_O", "CVD_C"]].max(axis=1)
+    df["CVD_L"] = df[["CVD_O", "CVD_C"]].min(axis=1)
+    return df
 
-def build_snapshot(symbol, klines, trades, settings: dict, pumpdump_info: dict = None) -> str:
+
+def build_snapshot(
+    symbol: str, klines: list, trades: list, settings: dict, pumpdump_info: dict | None = None, *, snapshot_dir: Path
+) -> str:
+    """Synchronous CPU work. Returns a unique PNG path, or '' if insufficient data."""
     df = klines_to_df(klines)
-    if df.empty: return ""
-    
-    max_turn = df['Turnover'].max()
-    res_p = df.loc[df['Turnover'].idxmax(), 'High']
-    label_usd = f"{max_turn/1000:.0f}k$"
-
-    # ТЕМЫ
-    is_dark = settings.get("theme", "dark") == "dark"
-    bg_color = '#0b0e11' if is_dark else '#ffffff'
-    text_color = '#707a8a' if is_dark else '#333333'
-    grid_color = '#1e2329' if is_dark else '#f0f0f0'
-    axis_text_color = 'white' if is_dark else 'black'
-
-    colors = mpf.make_marketcolors(up='#02c076', down='#f84960', inherit=True, volume='in', edge='inherit')
-    s = mpf.make_mpf_style(base_mpf_style='charles', marketcolors=colors, facecolor=bg_color, 
-                           edgecolor='#2b3139', gridcolor=grid_color, gridstyle='solid',
-                           rc={'font.size': 9, 'axes.labelcolor': text_color, 'xtick.color': '#555', 'ytick.color': text_color})
-
-    ap = []
-    ratios = [4]
-    cur_p = 1
-    headers = []
-
-    # 1. Volume Panel (Порядок №1)
-    ap.append(mpf.make_addplot(df['Volume'], panel=cur_p, type='bar', color='#02c076', alpha=0.3))
-    if settings.get('show_sma', 1):
-        ap.append(mpf.make_addplot(df['SMA9'], panel=cur_p, color='#00d2ff', width=1))
-    ratios.append(1.2); headers.append((cur_p, "Volume SMA 9")); cur_p += 1
-
-    # 2. CVD Candles (Порядок №2)
-    if settings.get('show_delta', 1):
-        c_df = df[['CVD_O', 'CVD_H', 'CVD_L', 'CVD_C']].copy(); c_df.columns = ['Open', 'High', 'Low', 'Close']
-        ap.append(mpf.make_addplot(c_df, panel=cur_p, type='candle'))
-        ratios.append(1.2); headers.append((cur_p, "<CoinGlass> Cumulative Volume Delta (CVD)")); cur_p += 1
-    
-    # 3. OI Candles (Порядок №3)
-    if settings.get('show_oi', 1):
-        o_df = df[['OI_O', 'OI_H', 'OI_L', 'OI_C']].copy(); o_df.columns = ['Open', 'High', 'Low', 'Close']
-        ap.append(mpf.make_addplot(o_df, panel=cur_p, type='candle'))
-        ratios.append(1.2); headers.append((cur_p, "<CoinGlass> Open Interest (OI)")); cur_p += 1
-        
-    # 4. Liquidations (Порядок №4)
-    if settings.get('show_liq', 1):
-        ap.append(mpf.make_addplot(df['Liq_U'], panel=cur_p, type='bar', color='#02c076', width=0.6))
-        ap.append(mpf.make_addplot(df['Liq_D'], panel=cur_p, type='bar', color='#f84960', width=0.6))
-        ratios.append(1.2); headers.append((cur_p, "<CoinGlass> Aggregate Liquidations")); cur_p += 1
-
-    fig, axlist = mpf.plot(df[['Open', 'High', 'Low', 'Close']], type='candle', style=s, volume=False, addplot=ap, figsize=(15, 12 + cur_p),
-                           returnfig=True, panel_ratios=tuple(ratios), datetime_format='%H:%M', tight_layout=False)
-
-    # Фиксированный отступ справа для цен
-    plt.subplots_adjust(left=0.05, right=0.82, top=0.94, bottom=0.05, hspace=0.35)
-
-    # Настройка ВСЕХ шкал цен
-    for i in range(0, len(axlist), 2):
-        ax = axlist[i]
-        ax.yaxis.tick_right(); ax.yaxis.set_label_position("right")
-        if i == 0:
-            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%g'))
-        else:
-            ax.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
-        ax.tick_params(axis='y', colors=axis_text_color, labelsize=10, labelright=True)
-
-    ax_main = axlist[0]
-    
-    # Heatmap (только фон за свечами)
-    if settings.get('show_heatmap', 1):
-        p_min, p_max = df['Low'].min(), df['High'].max()
-        price_bins = np.linspace(p_min, p_max, 50)
-        density = np.zeros((len(price_bins)-1, len(df)))
-        for i in range(len(df)):
-            h, l, v = df['High'].iloc[i], df['Low'].iloc[i], df['Volume'].iloc[i]
-            mask = (price_bins[:-1] >= l) & (price_bins[1:] <= h)
-            density[mask, i] = v
-        ax_main.imshow(density, interpolation='gaussian', origin='lower', aspect='auto',
-                       extent=[0, len(df)-1, p_min, p_max], cmap='inferno', alpha=0.15, zorder=0)
-
-    # Золотая линия
-    if res_p > 0:
-        ax_main.axhline(y=res_p, color='#f0b90b', linewidth=2, alpha=0.7, zorder=10)
-        ax_main.text(0.5, res_p, f" {label_usd} F {res_p:g} ", color='black', fontweight='bold', 
-                     ha='center', va='center', bbox=dict(boxstyle="round,pad=0.2", facecolor='#f0b90b', ec='none'), zorder=11)
-
-    # Последняя цена + пунктир
-    curr_v = df['Close'].iloc[-1]
-    ax_main.axhline(y=curr_v, color='#02c076', linestyle='--', linewidth=1.5, alpha=0.6, zorder=14)
-    ax_main.annotate(f" {curr_v:g} ", xy=(1, curr_v), xycoords=('axes fraction', 'data'),
-                     xytext=(10, 0), textcoords='offset points', color='black', fontweight='bold', 
-                     fontsize=12, va='center', ha='left', bbox=dict(boxstyle='round,pad=0.3', fc='#02c076', ec='none'), zorder=15)
-
-    # Чистый заголовок
-    title_str = f"{symbol}   {pumpdump_info['change_percent']:+.2f}%" if pumpdump_info else symbol
-    ax_main.text(0, 1.05, title_str, transform=ax_main.transAxes, fontsize=20, fontweight='bold', color='white' if is_dark else 'black')
-    ax_main.text(0.98, 1.05, f"TF: {settings.get('timeframe', '5')}m", transform=ax_main.transAxes, fontsize=14, color='#707a8a', ha='right')
-
-    for p_idx, text in headers:
-        axlist[p_idx*2].text(0.01, 0.85, text, transform=axlist[p_idx*2].transAxes, color='#707a8a', fontsize=8)
-
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    path = f"/tmp/snapshots/{symbol}_{ts}.png"
-    fig.savefig(path, dpi=120, facecolor=bg_color)
-    plt.close(fig)
-    return path
+    if len(df) < 10:
+        return ""
+    if not isinstance(symbol, str) or not symbol.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("Invalid symbol")
+    dark = settings.get("theme", "dark") == "dark"
+    bg, text = ("#0b0e11", "#c7ced8") if dark else ("#ffffff", "#333333")
+    up, down = "#02c076", "#f84960"
+    root = Path(snapshot_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{symbol.upper()}_{uuid.uuid4().hex}.png"
+    temporary = path.with_suffix(".tmp")
+    with _RENDER_LOCK:
+        fig = None
+        try:
+            style = mpf.make_mpf_style(
+                base_mpf_style="charles",
+                marketcolors=mpf.make_marketcolors(up=up, down=down, inherit=True, volume="in", edge="inherit"),
+                facecolor=bg,
+                edgecolor="#596579",
+                gridcolor="#252c36" if dark else "#e8ecf1",
+                gridstyle=":",
+                rc={"font.size": 9, "axes.labelcolor": text, "xtick.color": text, "ytick.color": text},
+            )
+            overlays, ratios = [], [4, 1]
+            if settings.get("show_sma", 1):
+                overlays.append(mpf.make_addplot(df["SMA9"], panel=1, color="#00a8cc", width=1))
+            if settings.get("show_delta", 0):
+                candles = df[["CVD_O", "CVD_H", "CVD_L", "CVD_C"]].rename(
+                    columns={
+                        "CVD_O": "Open",
+                        "CVD_H": "High",
+                        "CVD_L": "Low",
+                        "CVD_C": "Close",
+                    }
+                )
+                # mplfinance validates a Volume column even for secondary candle panels.
+                candles["Volume"] = 0.0
+                overlays.append(mpf.make_addplot(candles, panel=2, type="candle"))
+                ratios.append(1)
+            fig, axes = mpf.plot(
+                df,
+                type="candle",
+                style=style,
+                volume=True,
+                addplot=overlays or None,
+                figsize=(12, 8 if len(ratios) == 2 else 10),
+                returnfig=True,
+                panel_ratios=ratios,
+                datetime_format="%m-%d %H:%M",
+                tight_layout=False,
+                warn_too_much_data=1001,
+            )
+            fig.subplots_adjust(left=0.05, right=0.86, top=0.86, bottom=0.12, hspace=0.25)
+            main, volume_axis = axes[0], axes[2]
+            for axis in (main, volume_axis):
+                axis.yaxis.tick_right()
+                axis.yaxis.set_label_position("right")
+                axis.tick_params(axis="y", labelright=True, labelsize=9)
+            volume_axis.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
+            volume_axis.text(
+                0.01,
+                0.9,
+                "Volume (base asset)" + (" + SMA 9" if settings.get("show_sma", 1) else ""),
+                transform=volume_axis.transAxes,
+                color=text,
+                fontsize=8,
+                va="top",
+            )
+            if settings.get("show_heatmap", 0):
+                low, high = float(df["Low"].min()), float(df["High"].max())
+                if high > low:
+                    bins = np.linspace(low, high, 31)
+                    histogram = np.zeros(30)
+                    for candle in df.itertuples():
+                        overlap = np.maximum(0, np.minimum(bins[1:], candle.High) - np.maximum(bins[:-1], candle.Low))
+                        if overlap.sum() > 0:
+                            histogram += overlap / overlap.sum() * candle.Volume
+                    maximum = histogram.max()
+                    if maximum > 0:
+                        for index, amount in enumerate(histogram):
+                            main.axhspan(
+                                bins[index],
+                                bins[index + 1],
+                                xmin=0,
+                                xmax=float(amount / maximum),
+                                color="#f0b90b",
+                                alpha=0.10,
+                                zorder=0,
+                                linewidth=0,
+                            )
+                main.text(
+                    0.01,
+                    0.02,
+                    "Volume profile: uniform-in-candle estimate",
+                    transform=main.transAxes,
+                    color=text,
+                    fontsize=7,
+                )
+            if settings.get("show_delta", 0):
+                cvd_axis = axes[4]
+                cvd_axis.yaxis.tick_right()
+                cvd_axis.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
+                cvd_axis.text(
+                    0.01,
+                    0.9,
+                    "CVD proxy from OHLCV (NOT trade delta)",
+                    transform=cvd_axis.transAxes,
+                    color=text,
+                    fontsize=8,
+                    va="top",
+                )
+            price = float(df["Close"].iloc[-1])
+            direction = (pumpdump_info or {}).get("direction", "")
+            color = down if direction == "DUMP" else up
+            main.axhline(price, color=color, linestyle="--", linewidth=1, alpha=0.7)
+            main.annotate(
+                f" {price:.8g} ",
+                xy=(1, price),
+                xycoords=("axes fraction", "data"),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=10,
+                bbox={"boxstyle": "round,pad=0.25", "fc": color, "ec": "none"},
+                color="#07130e",
+            )
+            change = (pumpdump_info or {}).get("change_percent")
+            title = symbol + (f"  {change:+.2f}%" if change is not None else "")
+            main.text(0, 1.13, title, transform=main.transAxes, fontsize=18, fontweight="bold", color=text)
+            window = (pumpdump_info or {}).get("window_sec", 300)
+            detail = f"Move window: {window / 60:g} min" if change is not None else "Market snapshot"
+            if direction == "TEST":
+                detail = "TEST IMAGE — not a market signal"
+            timeframe = str(settings.get("timeframe", "5"))
+            label_tf = "1D" if timeframe == "D" else f"{timeframe}m"
+            main.text(0, 1.04, f"{detail} | Chart TF: {label_tf}", transform=main.transAxes, fontsize=10, color=text)
+            fig.text(
+                0.05, 0.035, f"Bybit public OHLCV | {datetime.now(UTC):%Y-%m-%d %H:%M UTC}", color=text, fontsize=8
+            )
+            fig.text(
+                0.05,
+                0.015,
+                "Informational only. No open-interest or liquidation feed. Not financial advice.",
+                color=text,
+                fontsize=7,
+            )
+            fig.savefig(temporary, format="png", dpi=120, facecolor=bg)
+            os.replace(temporary, path)
+            return str(path)
+        finally:
+            if fig is not None:
+                plt.close(fig)
+            temporary.unlink(missing_ok=True)
