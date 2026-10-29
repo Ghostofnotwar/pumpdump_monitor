@@ -1,11 +1,17 @@
-version: "3.8"
 services:
   bot:
     build: .
-    container_name: pumpdump_bot
     env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////data/bot.db
+      SNAPSHOT_DIR: /data/snapshots
+      PORT: "8000"
     volumes:
-      - ./data:/app/data
+      - bot-data:/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+volumes:
+  bot-data:

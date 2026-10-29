@@ -1,0 +1,46 @@
+name: Deploy to Fly
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fly-production
+  cancel-in-progress: false
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  deploy:
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' || vars.FLY_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+      - name: Check deployment configuration
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ vars.FLY_APP_NAME }}
+        run: |
+          test -n "$FLY_API_TOKEN" || { echo "Set the FLY_API_TOKEN production secret"; exit 1; }
+          test -n "$FLY_APP_NAME" || { echo "Set the FLY_APP_NAME production variable"; exit 1; }
+          flyctl config validate --config fly.toml --app "$FLY_APP_NAME"
+          COUNT=$(flyctl machine list --app "$FLY_APP_NAME" --json | jq 'length')
+          if [ "$COUNT" -gt 1 ]; then
+            echo "Refusing deployment: this SQLite/polling app requires exactly one machine."
+            echo "Inspect machines and intentionally scale down to one before deploying."
+            exit 1
+          fi
+      - name: Deploy single instance
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ vars.FLY_APP_NAME }}
+        run: flyctl deploy --config fly.toml --app "$FLY_APP_NAME" --remote-only --ha=false --strategy immediate
+      - name: Show machine status
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME: ${{ vars.FLY_APP_NAME }}
+        run: flyctl status --app "$FLY_APP_NAME"
