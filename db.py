@@ -47,6 +47,7 @@ class Database:
                 theme TEXT NOT NULL DEFAULT 'dark', direction TEXT NOT NULL DEFAULT 'both',
                 show_delta INTEGER NOT NULL DEFAULT 0, show_oi INTEGER NOT NULL DEFAULT 0,
                 show_liq INTEGER NOT NULL DEFAULT 0, show_heatmap INTEGER NOT NULL DEFAULT 0,
+                show_liq_heatmap INTEGER NOT NULL DEFAULT 0,
                 show_sma INTEGER NOT NULL DEFAULT 1, updated_at TEXT)""")
             async with db.execute("PRAGMA table_info(user_settings)") as cursor:
                 columns = {row[1] for row in await cursor.fetchall()}
@@ -67,6 +68,7 @@ class Database:
                 "show_oi": "INTEGER NOT NULL DEFAULT 0",
                 "show_liq": "INTEGER NOT NULL DEFAULT 0",
                 "show_heatmap": "INTEGER NOT NULL DEFAULT 0",
+                "show_liq_heatmap": "INTEGER NOT NULL DEFAULT 0",
                 "show_sma": "INTEGER NOT NULL DEFAULT 1",
                 "updated_at": "TEXT",
             }

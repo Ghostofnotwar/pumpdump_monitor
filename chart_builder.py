@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import matplotlib
+import matplotlib.colors
+import matplotlib.dates
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -69,8 +71,60 @@ def klines_to_df(klines: list) -> pd.DataFrame:
     return df
 
 
+def _align_indicator(df: pd.DataFrame, points: list, value_index: int = 1) -> pd.Series | None:
+    """Interpolate a sampled time series onto candle closes without extrapolating."""
+    if not points:
+        return None
+    clean = []
+    for point in points:
+        try:
+            stamp, value = int(point[0]), float(point[value_index])
+            if math.isfinite(value):
+                clean.append((stamp, value))
+        except (TypeError, ValueError, IndexError, OverflowError):
+            continue
+    if not clean:
+        return None
+    clean.sort()
+    source_x = np.asarray([item[0] for item in clean], dtype=float)
+    source_y = np.asarray([item[1] for item in clean], dtype=float)
+    target_x = df.index.to_numpy(dtype="datetime64[ms]").astype(float)
+    values = np.interp(target_x, source_x, source_y)
+    values[(target_x < source_x[0]) | (target_x > source_x[-1])] = np.nan
+    return pd.Series(values, index=df.index) if np.isfinite(values).any() else None
+
+
+def _aggregate_bars(df: pd.DataFrame, points: list, value_index: int) -> pd.Series | None:
+    """Sum liquidation notionals into chart candles; do not interpolate event amounts."""
+    if not points:
+        return None
+    timestamps = df.index.to_numpy(dtype="datetime64[ms]").astype(float)
+    values = np.full(len(df), np.nan)
+    populated = np.zeros(len(df), dtype=bool)
+    for point in points:
+        try:
+            stamp, amount = int(point[0]), float(point[value_index])
+            if not math.isfinite(amount) or amount < 0 or stamp < timestamps[0] or stamp > timestamps[-1]:
+                continue
+            index = min(len(df) - 1, max(0, int(np.searchsorted(timestamps, stamp, side="right") - 1)))
+            if not populated[index]:
+                values[index] = 0.0
+            values[index] += amount
+            populated[index] = True
+        except (TypeError, ValueError, IndexError, OverflowError):
+            continue
+    return pd.Series(values, index=df.index) if populated.any() else None
+
+
 def build_snapshot(
-    symbol: str, klines: list, trades: list, settings: dict, pumpdump_info: dict | None = None, *, snapshot_dir: Path
+    symbol: str,
+    klines: list,
+    trades: list,
+    settings: dict,
+    pumpdump_info: dict | None = None,
+    *,
+    snapshot_dir: Path,
+    indicators: dict | None = None,
 ) -> str:
     """Synchronous CPU work. Returns a unique PNG path, or '' if insufficient data."""
     df = klines_to_df(klines)
@@ -97,29 +151,52 @@ def build_snapshot(
                 gridstyle=":",
                 rc={"font.size": 9, "axes.labelcolor": text, "xtick.color": text, "ytick.color": text},
             )
-            overlays, ratios = [], [4, 1]
+            overlays, ratios, panel_labels = [], [4, 1], {}
             if settings.get("show_sma", 1):
                 overlays.append(mpf.make_addplot(df["SMA9"], panel=1, color="#00a8cc", width=1))
+            indicators = indicators or {}
             if settings.get("show_delta", 0):
-                candles = df[["CVD_O", "CVD_H", "CVD_L", "CVD_C"]].rename(
-                    columns={
-                        "CVD_O": "Open",
-                        "CVD_H": "High",
-                        "CVD_L": "Low",
-                        "CVD_C": "Close",
-                    }
-                )
-                # mplfinance validates a Volume column even for secondary candle panels.
-                candles["Volume"] = 0.0
-                overlays.append(mpf.make_addplot(candles, panel=2, type="candle"))
+                panel = len(ratios)
+                cvd = _align_indicator(df, indicators.get("cvd", []))
+                if cvd is not None:
+                    overlays.append(mpf.make_addplot(cvd, panel=panel, color="#31c9a5", width=1.3))
+                    panel_labels[panel] = f"CVD · {indicators.get('source', 'public trades')} (base qty)"
+                else:
+                    candles = df[["CVD_O", "CVD_H", "CVD_L", "CVD_C"]].rename(
+                        columns={"CVD_O": "Open", "CVD_H": "High", "CVD_L": "Low", "CVD_C": "Close"}
+                    )
+                    candles["Volume"] = 0.0
+                    overlays.append(mpf.make_addplot(candles, panel=panel, type="candle"))
+                    panel_labels[panel] = "CVD proxy from OHLCV · estimated, not trade delta"
                 ratios.append(1)
+            if settings.get("show_oi", 0):
+                oi = _align_indicator(df, indicators.get("oi", []))
+                if oi is not None:
+                    panel = len(ratios)
+                    overlays.append(mpf.make_addplot(oi, panel=panel, color="#b38cff", width=1.3))
+                    panel_labels[panel] = "Open interest · Binance contracts"
+                    ratios.append(1)
+            if settings.get("show_liq", 0):
+                liquidation_rows = indicators.get("liquidations", [])
+                long_liq = _aggregate_bars(df, liquidation_rows, 1)
+                short_liq = _aggregate_bars(df, liquidation_rows, 2)
+                if long_liq is not None and short_liq is not None:
+                    panel = len(ratios)
+                    overlays.extend(
+                        [
+                            mpf.make_addplot(long_liq, panel=panel, type="bar", color="#f84960", alpha=0.8),
+                            mpf.make_addplot(short_liq, panel=panel, type="bar", color="#02c076", alpha=0.8),
+                        ]
+                    )
+                    panel_labels[panel] = "Liquidations · USD notional (long red / short green)"
+                    ratios.append(1)
             fig, axes = mpf.plot(
                 df,
                 type="candle",
                 style=style,
                 volume=True,
                 addplot=overlays or None,
-                figsize=(12, 8 if len(ratios) == 2 else 10),
+                figsize=(12, 8 if len(ratios) == 2 else 10 + 1.5 * max(0, len(ratios) - 3)),
                 returnfig=True,
                 panel_ratios=ratios,
                 datetime_format="%m-%d %H:%M",
@@ -128,11 +205,15 @@ def build_snapshot(
             )
             fig.subplots_adjust(left=0.05, right=0.86, top=0.86, bottom=0.12, hspace=0.25)
             main, volume_axis = axes[0], axes[2]
-            for axis in (main, volume_axis):
+            for axis in axes[::2]:
                 axis.yaxis.tick_right()
                 axis.yaxis.set_label_position("right")
-                axis.tick_params(axis="y", labelright=True, labelsize=9)
+                axis.tick_params(axis="y", labelright=True, labelsize=8)
             volume_axis.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
+            for panel, label in panel_labels.items():
+                axis = axes[panel * 2]
+                axis.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
+                axis.text(0.01, 0.9, label, transform=axis.transAxes, color=text, fontsize=7, va="top")
             volume_axis.text(
                 0.01,
                 0.9,
@@ -172,19 +253,6 @@ def build_snapshot(
                     color=text,
                     fontsize=7,
                 )
-            if settings.get("show_delta", 0):
-                cvd_axis = axes[4]
-                cvd_axis.yaxis.tick_right()
-                cvd_axis.yaxis.set_major_formatter(mticker.FuncFormatter(human_format))
-                cvd_axis.text(
-                    0.01,
-                    0.9,
-                    "CVD proxy from OHLCV (NOT trade delta)",
-                    transform=cvd_axis.transAxes,
-                    color=text,
-                    fontsize=8,
-                    va="top",
-                )
             price = float(df["Close"].iloc[-1])
             direction = (pumpdump_info or {}).get("direction", "")
             color = down if direction == "DUMP" else up
@@ -216,10 +284,81 @@ def build_snapshot(
             fig.text(
                 0.05,
                 0.015,
-                "Informational only. No open-interest or liquidation feed. Not financial advice.",
+                "Optional Binance public derivatives feeds; unavailable panels omitted. Informational only, not financial advice.",
                 color=text,
                 fontsize=7,
             )
+            fig.savefig(temporary, format="png", dpi=120, facecolor=bg)
+            os.replace(temporary, path)
+            return str(path)
+        finally:
+            if fig is not None:
+                plt.close(fig)
+            temporary.unlink(missing_ok=True)
+
+
+def build_liquidation_heatmap(symbol: str, payload: dict, *, snapshot_dir: Path) -> str:
+    """Render Coinglass sparse model intensities; colorbar deliberately has no currency unit."""
+    candles, prices, points = payload.get("candles"), payload.get("y_axis"), payload.get("points")
+    if not candles or not prices or not points:
+        return ""
+    matrix = np.zeros((len(prices), len(candles)), dtype=float)
+    for candle_index, price_index, intensity in points:
+        try:
+            if 0 <= int(candle_index) < len(candles) and 0 <= int(price_index) < len(prices):
+                value = float(intensity)
+                if math.isfinite(value) and value >= 0:
+                    matrix[int(price_index), int(candle_index)] += value
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if matrix.max() <= 0:
+        return ""
+    if not isinstance(symbol, str) or not symbol.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("Invalid symbol")
+    root = Path(snapshot_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{symbol.upper()}_HEATMAP_{uuid.uuid4().hex}.png"
+    temporary = path.with_suffix(".tmp")
+    with _RENDER_LOCK:
+        fig = None
+        try:
+            bg, text = "#0b0e11", "#c7ced8"
+            fig, axis = plt.subplots(figsize=(12, 7), facecolor=bg)
+            axis.set_facecolor(bg)
+            dates = [datetime.fromtimestamp(stamp / 1000, UTC).replace(tzinfo=None) for stamp, _ in candles]
+            x = matplotlib.dates.date2num(dates)
+            y = np.asarray(prices, dtype=float)
+            axis.imshow(
+                matrix,
+                origin="lower",
+                aspect="auto",
+                interpolation="nearest",
+                extent=(x[0], x[-1] if x[-1] > x[0] else x[0] + 1 / 1440, y[0], y[-1]),
+                cmap="inferno",
+                norm=matplotlib.colors.PowerNorm(gamma=0.55, vmin=0, vmax=float(matrix.max())),
+            )
+            axis.plot(dates, [close for _, close in candles], color="#d5d9df", linewidth=0.9, alpha=0.9, label="Price")
+            axis.set_title(
+                f"{symbol.upper()} · Liquidation leverage heatmap", color=text, loc="left", fontsize=15, pad=14
+            )
+            axis.set_xlabel("Time (UTC)", color=text)
+            axis.set_ylabel("Price", color=text)
+            axis.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%m-%d %H:%M", tz=UTC))
+            axis.tick_params(colors=text, labelsize=8)
+            for spine in axis.spines.values():
+                spine.set_color("#596579")
+            colorbar = fig.colorbar(axis.images[0], ax=axis, pad=0.015)
+            colorbar.set_label("Model intensity (not USD)", color=text)
+            colorbar.ax.tick_params(colors=text, labelsize=8)
+            axis.legend(loc="upper left", framealpha=0.7, facecolor="#111720", labelcolor=text)
+            fig.text(
+                0.02,
+                0.015,
+                f"Coinglass API v4 · model output · {datetime.now(UTC):%Y-%m-%d %H:%M UTC}",
+                color=text,
+                fontsize=8,
+            )
+            fig.tight_layout(rect=(0, 0.035, 1, 1))
             fig.savefig(temporary, format="png", dpi=120, facecolor=bg)
             os.replace(temporary, path)
             return str(path)

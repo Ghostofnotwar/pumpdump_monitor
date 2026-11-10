@@ -84,6 +84,7 @@ SQLite и PNG находятся в именованном volume `/data`. Ко�
 | `BYBIT_REST` | `https://api.bybit.com` | REST endpoint или доверенный proxy |
 | `CLOUDFLARE_PROXY` | пусто | Legacy-алиас, только если `BYBIT_REST` не задан |
 | `BYBIT_TIMEOUT_SEC` | `15` | Таймаут одной HTTP-попытки |
+| `COINGLASS_API_KEY` | пусто | Опциональный ключ Coinglass API v4; без него heatmap пропускается |
 | `MAX_CONCURRENT_REQUESTS` | `8` | Параллельные запросы к Bybit |
 | `PAIRS_UPDATE_MIN` | `5` | Обновление вселенной, минуты |
 | `POLL_INTERVAL_SEC` | `2` | Интервал тиков, 1–60 секунд |
@@ -100,6 +101,31 @@ SQLite и PNG находятся в именованном volume `/data`. Ко�
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
 
 Все времена в интерфейсе и БД — UTC. Прежняя переменная `TZ` больше не управляет расчётами. `SNAP_INTERVAL_SEC` и `MAX_CONCURRENT_SNAPS` удалены: периодических скриншотов нет, графики строятся по событию и сериализуются для потокобезопасности Matplotlib.
+
+## Деривативы и скриншоты индикаторов
+
+Новые источники включены как независимые необязательные фиды, а не влияют на детектор алертов:
+
+- **CVD** — знак агрессора и объём из Binance USD-M `GET /fapi/v1/aggTrades`; ограниченная выборка до 1000 агрегированных сделок, поэтому линия может начинаться позже графика. При недоступности данных остаётся прежний CVD proxy из OHLCV с явной маркировкой.
+- **OI** — Binance `GET /futures/data/openInterestHist` (контракты; частота приводится к свечам).
+- **Ликвидации** — Binance `GET /fapi/v1/allForceOrders`, суммируются в USD-notional по свечам; long/short окрашены отдельно. Если API не вернул записи, панель скрывается, нулевые данные не подставляются.
+- **Отдельная heatmap** — платный Coinglass API v4 `GET /api/futures/liquidation/aggregated-heatmap/model1`, заголовок `CG-API-KEY`, параметры Binance / символ / интервал. `model2` не используется. Цветовая шкала подписана `Model intensity (not USD)` — это интенсивность модели, не денежная сумма.
+
+Три панели включаются в Telegram → **Панели графика**: CVD, OI и Liquidations. Для heatmap нужна отдельная опция **Coinglass liquidation heatmap** и `COINGLASS_API_KEY` в `.env` (тариф Professional/Enterprise). Данные кэшируются в памяти на 5 минут и параллельные одинаковые запросы объединяются. Если ключ отсутствует, entitlement не выдан или API недоступен — отдельная картинка пропускается, основной алерт доставляется.
+
+Пример локального запуска (без Telegram/Coinglass ключей тесты работают offline):
+
+```bash
+python -m venv .venv
+. .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+pip install -r requirements-dev.txt
+python -m pytest -q
+cp .env.example .env  # задайте BOT_TOKEN для полноценного запуска
+# опционально: внесите COINGLASS_API_KEY в .env
+python main.py
+```
+
+В первом графике панели отображаются в отдельных подграфиках: CVD (base quantity), OI (contracts), liquidation notional (USD; long/short). Дополнительный PNG heatmap имеет тёмный фон, свечную линию цены, цену по Y, время по X и inferno-интенсивность. Скриншоты автоматически удаляются общей политикой retention. Синтетические тесты проверяют формат/рендер/обработку пропусков; live-качество поставщиков и покрытие Binance из production-региона нужно проверить отдельно.
 
 ## GitHub → Fly.io
 
@@ -134,7 +160,7 @@ python backup_db.py --database data/bot.db --output /secure/path/bot-backup.db
 - `monitor.py`, `detector.py` — сбор, окно движения, очередь и доставка.
 - `bybit_client.py` — публичный REST, таймауты, retry, пагинация.
 - `db.py`, `settings_rules.py` — SQLite, миграции, проверка настроек и антиспам.
-- `chart_builder.py`, `snapshots.py` — графики и хранение PNG.
+- `chart_builder.py`, `market_indicators.py`, `snapshots.py` — графики, Binance public derivatives / Coinglass heatmap и хранение PNG.
 - `bot_handlers.py`, `auth.py` — команды и проверка подписи Mini App.
 - `web_app.py`, `templates/`, `static/` — HTTP API и интерфейс.
 - `AUDIT.md` — независимая оценка исходной версии и оставшиеся ограничения.

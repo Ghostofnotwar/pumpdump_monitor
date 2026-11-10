@@ -188,15 +188,20 @@ async def indicator_settings_callback(update: Update, context):
         [InlineKeyboardButton(f"{'✅' if settings[field] else '❌'} {label}", callback_data=f"toggle_ind_{field}")]
         for field, label in (
             ("show_sma", "Volume SMA 9"),
-            ("show_delta", "CVD proxy · оценка"),
-            ("show_heatmap", "Профиль объёма · оценка"),
+            ("show_delta", "CVD · Binance trades / proxy fallback"),
+            ("show_oi", "Open interest · Binance"),
+            ("show_liq", "Liquidations · Binance"),
+            ("show_heatmap", "Volume profile · estimate"),
+            ("show_liq_heatmap", "Coinglass liquidation heatmap · separate PNG"),
         )
     ]
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="settings")])
     await show(
         update,
-        "📊 <b>Панели графика</b>\n\nCVD рассчитывается из OHLCV, а не из покупок/продаж. "
-        "Профиль распределяет объём равномерно внутри свечи. Это не реальный поток сделок, OI или ликвидации.",
+        "📊 <b>Панели графика</b>\n\nCVD строится по публичным Binance aggTrades, при недоступности показывается отдельно помеченная OHLCV-оценка. "
+        "OI и ликвидации берутся из публичных Binance USD-M endpoints и могут отсутствовать в регионе/ответе API. "
+        "Coinglass heatmap отправляется отдельным PNG; интенсивность — модельный выход, не сумма в USD. "
+        "Старый volume profile является только оценкой распределения объёма.",
         InlineKeyboardMarkup(rows),
     )
 
@@ -294,7 +299,14 @@ async def button_callback(update: Update, context):
         changes = {"direction": data.removeprefix("direction_")}
     elif data in {"set_theme_dark", "set_theme_light"}:
         changes = {"theme": data.removeprefix("set_theme_")}
-    elif data in {"toggle_ind_show_sma", "toggle_ind_show_delta", "toggle_ind_show_heatmap"}:
+    elif data in {
+        "toggle_ind_show_sma",
+        "toggle_ind_show_delta",
+        "toggle_ind_show_oi",
+        "toggle_ind_show_liq",
+        "toggle_ind_show_heatmap",
+        "toggle_ind_show_liq_heatmap",
+    }:
         field = data.removeprefix("toggle_ind_")
         changes = {field: 0 if settings[field] else 1}
     elif data in {"vol_plus", "vol_minus"}:

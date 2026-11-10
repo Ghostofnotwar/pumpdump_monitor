@@ -55,6 +55,12 @@ async def seed(monitor, change=6):
     return now
 
 
+async def test_paper_calm_market_does_not_emit_false_alert(monitor):
+    await seed(monitor, 0.1)
+    assert monitor._queue.empty()
+    assert monitor.sent_count == 0
+
+
 async def test_pump_and_dump_honor_user_settings(monitor):
     await seed(monitor, 6)
     assert monitor._queue.qsize() == 1
@@ -88,6 +94,21 @@ async def test_no_duplicate_during_sustained_move(monitor):
     assert monitor._queue.qsize() == 1
 
 
+async def test_render_integrates_all_optional_derivatives_panels(monitor, monkeypatch):
+    data = {
+        "source": "Test public feed",
+        "cvd": [[1700000000000 + i * 60000, float(i)] for i in range(80)],
+        "oi": [[1700000000000 + i * 60000, 1000 + i] for i in range(80)],
+        "liquidations": [[1700000000000 + i * 60000, 500 + i, 300 + i] for i in range(80)],
+    }
+    monkeypatch.setattr(monitor.market_indicators, "indicators", AsyncMock(return_value=data))
+    path = await monitor.render(
+        "BTCUSDT", {"timeframe": "1", "show_delta": 1, "show_oi": 1, "show_liq": 1, "theme": "dark"}
+    )
+    assert path is not None and path.stat().st_size > 10_000
+    monitor.market_indicators.indicators.assert_awaited_once_with("BTCUSDT", "1", limit=200)
+
+
 async def test_delivery_closes_file_and_records_history(monitor):
     await seed(monitor)
     job = monitor._queue.get_nowait()
@@ -97,6 +118,31 @@ async def test_delivery_closes_file_and_records_history(monitor):
     assert len(await monitor.db.get_alerts(1)) == 1
     assert monitor.sent_count == 1
     assert "PUMP" in monitor.bot.photos[0][2]["caption"]
+
+
+async def test_coinglass_heatmap_is_a_separate_optional_photo(monitor, monkeypatch, tmp_path):
+    await seed(monitor)
+    await monitor.db.save_settings(1, {"show_liq_heatmap": True})
+    heatmap = tmp_path / "BTCUSDT_HEATMAP_test.png"
+    heatmap.write_bytes(b"png placeholder")
+    monkeypatch.setattr(monitor, "render_heatmap", AsyncMock(return_value=heatmap))
+    job = monitor._queue.get_nowait()
+    await monitor._deliver(job)
+    assert job.delivered
+    assert len(monitor.bot.photos) == 2
+    assert "liquidation heatmap" in monitor.bot.photos[1][2]["caption"]
+    assert all(photo.closed for photo in monitor.bot.closed)
+
+
+async def test_coinglass_failure_does_not_block_main_alert(monitor, monkeypatch):
+    await seed(monitor)
+    await monitor.db.save_settings(1, {"show_liq_heatmap": True})
+    monkeypatch.setattr(monitor, "render_heatmap", AsyncMock(side_effect=RuntimeError("no API key")))
+    job = monitor._queue.get_nowait()
+    await monitor._deliver(job)
+    assert job.delivered
+    assert len(monitor.bot.photos) == 1
+    assert len(await monitor.db.get_alerts(1)) == 1
 
 
 async def test_chart_failure_falls_back_to_text(monitor, monkeypatch):

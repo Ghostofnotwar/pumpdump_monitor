@@ -19,6 +19,7 @@ DEFAULT_SETTINGS = {
     "show_oi": 0,
     "show_liq": 0,
     "show_heatmap": 0,
+    "show_liq_heatmap": 0,
     "show_sma": 1,
 }
 EDITABLE_FIELDS = frozenset(
@@ -30,11 +31,16 @@ EDITABLE_FIELDS = frozenset(
         "theme",
         "direction",
         "show_delta",
+        "show_oi",
+        "show_liq",
         "show_heatmap",
+        "show_liq_heatmap",
         "show_sma",
     }
 )
-BOOLEAN_FIELDS = frozenset({"paused", "show_delta", "show_heatmap", "show_sma"})
+BOOLEAN_FIELDS = frozenset(
+    {"paused", "show_delta", "show_oi", "show_liq", "show_heatmap", "show_liq_heatmap", "show_sma"}
+)
 
 
 def validate_settings(fields: dict) -> dict:
