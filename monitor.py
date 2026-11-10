@@ -17,10 +17,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Forbidden, RetryAfter, TelegramError
 
 from bybit_client import BybitClient
-from chart_builder import build_snapshot
+from chart_builder import build_liquidation_heatmap, build_snapshot
 from config import Config
 from db import Database
 from detector import rolling_change
+from market_indicators import MarketIndicators
 from snapshots import cleanup_snapshots, snapshot_path
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class AlertJob:
 class Monitor:
     def __init__(self, bot, client: BybitClient, db: Database, config: Config):
         self.bot, self.client, self.db, self.config = bot, client, db, config
+        self.market_indicators = MarketIndicators(config.coinglass_api_key, timeout=config.request_timeout_sec)
         self.symbols: list[str] = []
         self._symbol_set: set[str] = set()
         self.turnover: dict[str, float] = {}
@@ -349,10 +351,29 @@ class Monitor:
     async def render(self, symbol: str, settings: dict, info: dict | None = None) -> Path | None:
         async with self._render_semaphore:
             klines = await self.client.get_klines(symbol, settings["timeframe"], limit=80)
+            indicator_data = {"cvd": [], "oi": [], "liquidations": [], "source": "unavailable"}
+            if any(settings.get(field, 0) for field in ("show_delta", "show_oi", "show_liq")):
+                indicator_data = await self.market_indicators.indicators(symbol, settings["timeframe"], limit=200)
             path = await asyncio.to_thread(
-                build_snapshot, symbol, klines, [], settings, info, snapshot_dir=self.config.snapshot_dir
+                build_snapshot,
+                symbol,
+                klines,
+                [],
+                settings,
+                info,
+                snapshot_dir=self.config.snapshot_dir,
+                indicators=indicator_data,
             )
             return snapshot_path(self.config.snapshot_dir, path)
+
+    async def render_heatmap(self, symbol: str, timeframe: str) -> Path | None:
+        payload = await self.market_indicators.heatmap(symbol, timeframe)
+        if not payload:
+            return None
+        path = await asyncio.to_thread(
+            build_liquidation_heatmap, symbol, payload, snapshot_dir=self.config.snapshot_dir
+        )
+        return snapshot_path(self.config.snapshot_dir, path)
 
     async def _pace_chat(self, chat_id: int):
         async with self._send_lock:
@@ -406,6 +427,29 @@ class Monitor:
                     read_timeout=30,
                     write_timeout=30,
                 )
+            if settings.get("show_liq_heatmap", 0):
+                try:
+                    heatmap = await self.render_heatmap(job.symbol, settings["timeframe"])
+                    if heatmap:
+                        await self._pace_chat(job.chat_id)
+                        with heatmap.open("rb") as photo:
+                            await self.bot.send_photo(
+                                job.chat_id,
+                                photo=photo,
+                                caption=(
+                                    f"🔥 <b>{html.escape(job.symbol)} · liquidation heatmap</b>\n"
+                                    "Coinglass model intensity (not USD). Informational only."
+                                ),
+                                parse_mode="HTML",
+                                read_timeout=30,
+                                write_timeout=30,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Optional Coinglass heatmap delivery skipped for %s (%s)",
+                        job.symbol,
+                        type(exc).__name__,
+                    )
             job.delivered = True
             self.sent_count += 1
         except Forbidden:

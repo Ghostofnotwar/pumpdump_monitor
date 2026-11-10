@@ -85,6 +85,7 @@ class Config:
     cleanup_interval_sec: float = 3600
     drop_pending_updates: bool = False
     log_level: str = "INFO"
+    coinglass_api_key: str = field(default="", repr=False)
 
     @property
     def history_size(self) -> int:
@@ -140,6 +141,7 @@ class Config:
             snapshot_max_mb=_number("SNAPSHOT_MAX_MB", "512", 10, 10000, integer=True),
             drop_pending_updates=_bool("DROP_PENDING_UPDATES"),
             log_level=level,
+            coinglass_api_key=os.getenv("COINGLASS_API_KEY", "").strip(),
         )
 
     def require_bot_token(self) -> None:
